@@ -100,6 +100,8 @@ struct thread
     //modified by me
     int64_t wakeup_tick;                /* Local tick*/
 
+    int exit_status;   
+    struct file *exec_file;
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */

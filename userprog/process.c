@@ -29,19 +29,30 @@ tid_t
 process_execute (const char *file_name) 
 {
   char *fn_copy;
+  char *prog_name;
   tid_t tid;
 
-  /* Make a copy of FILE_NAME.
-     Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
   if (fn_copy == NULL)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
-  /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  char *file_name_copy = palloc_get_page (0);
+  if (file_name_copy == NULL) {
+    palloc_free_page (fn_copy);
+    return TID_ERROR;
+  }
+  strlcpy (file_name_copy, file_name, PGSIZE);
+
+  char *save_ptr;
+  prog_name = strtok_r (file_name_copy, " ", &save_ptr);
+
+  tid = thread_create (prog_name, PRI_DEFAULT, start_process, fn_copy);
+
   if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
+    palloc_free_page (fn_copy);
+  palloc_free_page (file_name_copy);
+
   return tid;
 }
 
@@ -54,28 +65,43 @@ start_process (void *file_name_)
   struct intr_frame if_;
   bool success;
 
-  /* Initialize interrupt frame and load executable. */
+  char *token, *save_ptr;
+  int argc = 0;
+  char *argv[32];  
+
+  char *fn_copy = palloc_get_page (0);
+  if (fn_copy == NULL)
+    thread_exit ();
+  strlcpy (fn_copy, file_name, PGSIZE);
+
+  for (token = strtok_r (fn_copy, " ", &save_ptr); token != NULL;
+       token = strtok_r (NULL, " ", &save_ptr))
+  {
+    argv[argc++] = token;
+  }
+
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
 
-  /* If load failed, quit. */
-  palloc_free_page (file_name);
-  if (!success) 
+  success = load (argv[0], &if_.eip, &if_.esp);
+  if (!success) {
+    palloc_free_page (file_name);
+    palloc_free_page (fn_copy);
     thread_exit ();
+  }
 
-  /* Start the user process by simulating a return from an
-     interrupt, implemented by intr_exit (in
-     threads/intr-stubs.S).  Because intr_exit takes all of its
-     arguments on the stack in the form of a `struct intr_frame',
-     we just point the stack pointer (%esp) to our stack frame
-     and jump to it. */
+  argument_stack(argv, argc, &if_.esp);  
+
+  hex_dump(if_.esp, if_.esp, PHYS_BASE - if_.esp, true);
+
+  palloc_free_page (file_name);
+  palloc_free_page (fn_copy);
+
   asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
   NOT_REACHED ();
 }
-
 /* Waits for thread TID to die and returns its exit status.  If
    it was terminated by the kernel (i.e. killed due to an
    exception), returns -1.  If TID is invalid or if it was not a
@@ -86,10 +112,14 @@ start_process (void *file_name_)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) 
-{
+process_wait (tid_t child_tid UNUSED) {
+ volatile int i;
+  for (i = 0; i < 1000000000; i++) {
+  }
   return -1;
 }
+
+
 
 /* Free the current process's resources. */
 void
@@ -227,6 +257,11 @@ load (const char *file_name, void (**eip) (void), void **esp)
     {
       printf ("load: %s: open failed\n", file_name);
       goto done; 
+    }
+  else 
+    {
+       file_deny_write(file);                     
+       thread_current()->exec_file = file;       
     }
 
   /* Read and verify executable header. */
@@ -463,3 +498,43 @@ install_page (void *upage, void *kpage, bool writable)
   return (pagedir_get_page (t->pagedir, upage) == NULL
           && pagedir_set_page (t->pagedir, upage, kpage, writable));
 }
+
+void
+argument_stack(char **argv, int argc, void **esp)
+{
+  char *arg_addr[32];  
+  int total_len = 0;
+  int i;
+
+  for (i = argc - 1; i >= 0; i--) {
+    int len = strlen(argv[i]) + 1;  
+    *esp -= len;
+    memcpy(*esp, argv[i], len);
+    arg_addr[i] = *esp;  
+    total_len += len;
+  }
+
+  while ((uintptr_t)(*esp) % 4 != 0) {
+    *esp -= 1;
+    *(uint8_t *)(*esp) = 0;
+  }
+
+  *esp -= 4;
+  *(void **)(*esp) = NULL;
+
+  for (i = argc - 1; i >= 0; i--) {
+    *esp -= 4;
+    *(void **)(*esp) = arg_addr[i];
+  }
+
+  void *argv_start = *esp;
+  *esp -= 4;
+  *(void **)(*esp) = argv_start;
+
+  *esp -= 4;
+  *(int *)(*esp) = argc;
+
+  *esp -= 4;
+  *(void **)(*esp) = 0;
+}
+
